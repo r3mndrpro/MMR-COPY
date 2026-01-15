@@ -523,16 +523,31 @@ await Actor.main(async () => {
                 console.log('  ⏳ Waiting 4-7 seconds for results...');
                 await humanDelay(4000, 7000);
 
-                // Check if VIN was found
-                const vinNotFound = await mmrPage.evaluate(() => {
+                // Check if VIN was found (improved detection)
+                const pageStatus = await mmrPage.evaluate(() => {
                     const errorText = document.body.textContent.toLowerCase();
-                    return errorText.includes('no data found') ||
-                           errorText.includes('vin not found') ||
-                           errorText.includes('invalid vin');
+                    const hasErrorMessage = errorText.includes('no data found') ||
+                                          errorText.includes('vin not found') ||
+                                          errorText.includes('invalid vin') ||
+                                          errorText.includes('no results') ||
+                                          errorText.includes('not available');
+
+                    // Also check if odometer input exists (if not, likely VIN not found)
+                    const hasOdometerInput = !!document.querySelector('input#Odometer');
+
+                    return {
+                        vinNotFound: hasErrorMessage || !hasOdometerInput,
+                        hasOdometerInput: hasOdometerInput,
+                        errorMessage: hasErrorMessage
+                    };
                 });
 
-                if (vinNotFound) {
-                    console.log('⚠️ VIN not found in MMR database');
+                if (pageStatus.vinNotFound) {
+                    const reason = pageStatus.errorMessage
+                        ? 'VIN not found in MMR database (error message detected)'
+                        : 'VIN not found in MMR database (odometer input missing)';
+
+                    console.log(`⚠️ ${reason}`);
 
                     // Send to webhook with status
                     await fetch(n8nWebhookUrl, {
@@ -546,7 +561,7 @@ await Actor.main(async () => {
                             cargurus_mileage_km,
                             mileage_miles,
                             mmr_status: 'vin_not_found',
-                            error: 'VIN not found in MMR database'
+                            error: reason
                         })
                     });
 
@@ -878,8 +893,21 @@ await Actor.main(async () => {
                 vinsFailed++;
                 vinsProcessed++;
 
-                // Continue to next VIN even if one fails
-                await humanDelay(3000, 5000);
+                // CRITICAL: Refresh the page to recover from error state
+                console.log('  🔄 Refreshing MMR tool to recover from error...');
+                try {
+                    await mmrPage.goto('https://mmr.manheim.com/ui-mmr/?country=US&popup=true&source=man', {
+                        waitUntil: 'domcontentloaded',
+                        timeout: 30000
+                    });
+                    await humanDelay(3000, 4000);
+                    console.log('  ✅ MMR tool refreshed and ready');
+                } catch (refreshError) {
+                    console.error('  ⚠️ Failed to refresh page:', refreshError.message);
+                }
+
+                // Wait before next VIN
+                await humanDelay(2000, 3000);
             }
         }
 
